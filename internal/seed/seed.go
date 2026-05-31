@@ -3,6 +3,8 @@ package seed
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"time"
 
 	"ruta13/internal/roster"
@@ -11,18 +13,23 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
+const (
+	targetBase   = 80
+	targetRelief = 35
+	targetUnits  = 77
+)
+
 func Ensure(app core.App) error {
-	driverCount, err := count(app, roster.DriversCollection)
-	if err != nil {
-		return err
-	}
 	if err := ensureUsers(app); err != nil {
 		return err
 	}
-	if driverCount > 0 {
-		return ensureWorkLogs(app)
+	if err := ensureDrivers(app); err != nil {
+		return err
 	}
-	if err := seedDomain(app); err != nil {
+	if err := ensureUnits(app); err != nil {
+		return err
+	}
+	if err := ensureEmailRecipient(app); err != nil {
 		return err
 	}
 	return ensureWorkLogs(app)
@@ -59,67 +66,145 @@ func ensureUsers(app core.App) error {
 	return nil
 }
 
-func seedDomain(app core.App) error {
-	drivers, err := app.FindCollectionByNameOrId(roster.DriversCollection)
+func ensureDrivers(app core.App) error {
+	col, err := app.FindCollectionByNameOrId(roster.DriversCollection)
 	if err != nil {
 		return err
 	}
-	units, err := app.FindCollectionByNameOrId(roster.UnitsCollection)
-	if err != nil {
-		return err
-	}
-	emails, err := app.FindCollectionByNameOrId(roster.EmailRecipientsCollection)
-	if err != nil {
-		return err
-	}
-	baseIDs := []string{}
 	weekdays := []string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-	for i := 1; i <= 10; i++ {
-		rec := core.NewRecord(drivers)
-		rec.Set("name", fmt.Sprintf("Conductor Base %02d", i))
+
+	// Base drivers
+	baseDrivers, err := app.FindAllRecords(roster.DriversCollection, dbx.HashExp{"type": "base"})
+	if err != nil {
+		return err
+	}
+	maxBase := 0
+	for _, d := range baseDrivers {
+		n := 0
+		fmt.Sscanf(d.GetString("name"), "Conductor Base %d", &n)
+		if n > maxBase {
+			maxBase = n
+		}
+	}
+	for len(baseDrivers) < targetBase {
+		maxBase++
+		rec := core.NewRecord(col)
+		rec.Set("name", fmt.Sprintf("Conductor Base %02d", maxBase))
 		rec.Set("type", "base")
-		rec.Set("rest_day", weekdays[(i-1)%len(weekdays)])
+		rec.Set("rest_day", weekdays[(maxBase-1)%len(weekdays)])
 		rec.Set("is_active", true)
 		if err := app.Save(rec); err != nil {
 			return err
 		}
-		baseIDs = append(baseIDs, rec.Id)
+		baseDrivers = append(baseDrivers, rec)
 	}
-	reliefIDs := []string{}
-	for i := 1; i <= 5; i++ {
-		rec := core.NewRecord(drivers)
-		rec.Set("name", fmt.Sprintf("Relevo %02d", i))
+
+	// Relief drivers
+	reliefDrivers, err := app.FindAllRecords(roster.DriversCollection, dbx.HashExp{"type": "relief"})
+	if err != nil {
+		return err
+	}
+	maxRelief := 0
+	for _, d := range reliefDrivers {
+		n := 0
+		fmt.Sscanf(d.GetString("name"), "Relevo %d", &n)
+		if n > maxRelief {
+			maxRelief = n
+		}
+	}
+	for len(reliefDrivers) < targetRelief {
+		maxRelief++
+		rec := core.NewRecord(col)
+		rec.Set("name", fmt.Sprintf("Relevo %02d", maxRelief))
 		rec.Set("type", "relief")
 		rec.Set("rest_day", "")
 		rec.Set("is_active", true)
 		if err := app.Save(rec); err != nil {
 			return err
 		}
-		reliefIDs = append(reliefIDs, rec.Id)
+		reliefDrivers = append(reliefDrivers, rec)
 	}
-	for i := 0; i < 8; i++ {
-		rec := core.NewRecord(units)
-		rec.Set("number", fmt.Sprintf("%d", 400+i*2))
-		if i < 6 {
-			rec.Set("status", "operational")
-		} else {
-			rec.Set("status", "in_shop")
+
+	return nil
+}
+
+func ensureUnits(app core.App) error {
+	col, err := app.FindCollectionByNameOrId(roster.UnitsCollection)
+	if err != nil {
+		return err
+	}
+
+	existingUnits, err := app.FindAllRecords(roster.UnitsCollection, dbx.NewExp("1=1"))
+	if err != nil {
+		return err
+	}
+	if len(existingUnits) >= targetUnits {
+		return nil
+	}
+
+	// Find highest unit number to continue the sequence
+	maxNum := 0
+	assignedDriverIDs := map[string]bool{}
+	for _, u := range existingUnits {
+		n, _ := strconv.Atoi(u.GetString("number"))
+		if n > maxNum {
+			maxNum = n
 		}
-		rec.Set("base_driver", baseIDs[i])
-		rec.Set("cycle_position", i%6)
+		if d := u.GetString("base_driver"); d != "" {
+			assignedDriverIDs[d] = true
+		}
+	}
+	if maxNum == 0 {
+		maxNum = 398
+	}
+
+	// Collect unassigned base drivers sorted by name
+	allBase, err := app.FindAllRecords(roster.DriversCollection, dbx.HashExp{"type": "base", "is_active": true})
+	if err != nil {
+		return err
+	}
+	sort.Slice(allBase, func(i, j int) bool {
+		return allBase[i].GetString("name") < allBase[j].GetString("name")
+	})
+	unassigned := make([]*core.Record, 0)
+	for _, d := range allBase {
+		if !assignedDriverIDs[d.Id] {
+			unassigned = append(unassigned, d)
+		}
+	}
+
+	toAdd := targetUnits - len(existingUnits)
+	offset := len(existingUnits)
+	for i := 0; i < toAdd; i++ {
+		maxNum += 2
+		rec := core.NewRecord(col)
+		rec.Set("number", fmt.Sprintf("%d", maxNum))
+		rec.Set("status", "operational")
+		rec.Set("cycle_position", offset+i)
+		if i < len(unassigned) {
+			rec.Set("base_driver", unassigned[i].Id)
+		}
 		if err := app.Save(rec); err != nil {
 			return err
 		}
 	}
-	recipient := core.NewRecord(emails)
-	recipient.Set("email", "supervisor@ruta13.local")
-	recipient.Set("name", "Supervisor")
-	recipient.Set("is_active", true)
-	if err := app.Save(recipient); err != nil {
+	return nil
+}
+
+func ensureEmailRecipient(app core.App) error {
+	existing, err := app.FindAllRecords(roster.EmailRecipientsCollection, dbx.NewExp("1=1"))
+	if err != nil || len(existing) > 0 {
 		return err
 	}
-
-	return nil
+	col, err := app.FindCollectionByNameOrId(roster.EmailRecipientsCollection)
+	if err != nil {
+		return err
+	}
+	rec := core.NewRecord(col)
+	rec.Set("email", "supervisor@ruta13.local")
+	rec.Set("name", "Supervisor")
+	rec.Set("is_active", true)
+	return app.Save(rec)
 }
 
 func ensureWorkLogs(app core.App) error {
