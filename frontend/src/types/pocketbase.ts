@@ -1,0 +1,12 @@
+export type UserRole = 'admin' | 'supervisor';
+export type DriverType = 'base' | 'relief';
+export type UnitStatus = 'operational' | 'in_shop';
+export type RosterStatus = 'draft' | 'published';
+export type AnyRecord = Record<string, any> & { id: string };
+export type AuthUser = AnyRecord & { email: string; role: UserRole };
+export type Driver = AnyRecord & { name: string; type: DriverType; rest_day?: string; is_active: boolean };
+export type Unit = AnyRecord & { number: string; status: UnitStatus; base_driver?: string; cycle_position: number; expand?: { base_driver?: Driver } };
+export type DailyRoster = AnyRecord & { date: string; status: RosterStatus; published_at?: string };
+export type RosterEntry = AnyRecord & { roster: string; unit: string; driver?: string; is_substitute: boolean; departure_time: string; expand?: { unit?: Unit; driver?: Driver } };
+export type StandbyEntry = AnyRecord & { roster: string; driver: string; position: number; expand?: { driver?: Driver } };
+export type EmailRecipient = AnyRecord & { email: string; name?: string; is_active: boolean };
